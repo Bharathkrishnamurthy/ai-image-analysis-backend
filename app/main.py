@@ -14,6 +14,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,6 +23,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Routers
 app.include_router(auth_router)
 app.include_router(image_router, prefix="/image", tags=["Image"])
 
@@ -29,8 +31,12 @@ app.include_router(image_router, prefix="/image", tags=["Image"])
 @app.on_event("startup")
 def on_startup():
     print("🚀 Starting application...")
+
+    # Ensure DB tables exist
     Base.metadata.create_all(bind=engine)
     print("✅ Database tables ensured.")
+
+    print("🤖 YOLO model ready for inference.")
 
 
 @app.get("/")
@@ -39,3 +45,8 @@ def root():
         "message": "AI Image Analysis Backend is Running 🚀",
         "status": "active"
     }
+
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}

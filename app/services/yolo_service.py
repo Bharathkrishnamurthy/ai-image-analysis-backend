@@ -1,12 +1,19 @@
 from ultralytics import YOLO
+import os
 import time
 
-# Load YOLOv8 model (lightweight model)
-model = YOLO("yolov8n.pt")
+# Get model path from environment variable
+MODEL_PATH = os.getenv("MODEL_PATH", "yolov8n.pt")
+
+print("🚀 Loading YOLO model...")
+
+# Load model only once when service starts
+model = YOLO(MODEL_PATH)
+
+print("✅ YOLO model loaded successfully")
 
 
 def detect_objects(image_path):
-
     start_time = time.time()
 
     results = model(image_path)
