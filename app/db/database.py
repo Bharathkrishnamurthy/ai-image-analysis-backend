@@ -2,11 +2,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 import os
 
-# Use environment variable if available, otherwise default
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:5052586@host.docker.internal:5432/ai_db"
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable is not set")
 
 engine = create_engine(DATABASE_URL, echo=True)
 
@@ -18,4 +17,4 @@ SessionLocal = sessionmaker(
 
 Base = declarative_base()
 
-print("✅ Database connected:", DATABASE_URL)
+print("✅ Database configuration loaded")
