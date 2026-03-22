@@ -1,44 +1,48 @@
 from ultralytics import YOLO
 import os
 import time
+import logging
 
-# Get model path from environment variable
+logger = logging.getLogger(__name__)
+
 MODEL_PATH = os.getenv("MODEL_PATH", "yolov8n.pt")
 
 print("🚀 Loading YOLO model...")
-
-# Load model only once when service starts
 model = YOLO(MODEL_PATH)
-
 print("✅ YOLO model loaded successfully")
 
 
-def detect_objects(image_path):
+def detect_objects(image_path: str):
     start_time = time.time()
 
-    results = model(image_path)
+    try:
+        results = model(image_path)
 
-    detections = []
+        detections = []
 
-    for result in results:
-        boxes = result.boxes
+        for result in results:
+            boxes = result.boxes
 
-        if boxes is not None:
-            for box in boxes:
+            if boxes is not None:
+                for box in boxes:
+                    class_id = int(box.cls[0])
+                    label = model.names[class_id]
+                    confidence = float(box.conf[0])
 
-                class_id = int(box.cls[0])
-                label = model.names[class_id]
-                confidence = float(box.conf[0])
+                    detections.append({
+                        "label": label,
+                        "confidence": round(confidence, 2)
+                    })
 
-                detections.append({
-                    "label": label,
-                    "confidence": round(confidence, 2)
-                })
+        return {
+            "total_objects": len(detections),
+            "objects": detections,
+            "processing_time_seconds": round(time.time() - start_time, 3)
+        }
 
-    end_time = time.time()
-
-    return {
-        "total_objects": len(detections),
-        "objects": detections,
-        "processing_time_seconds": round(end_time - start_time, 3)
-    }
+    except Exception as e:
+        logger.error(f"YOLO inference failed: {str(e)}")
+        return {
+            "error": "Inference failed",
+            "details": str(e)
+        }
