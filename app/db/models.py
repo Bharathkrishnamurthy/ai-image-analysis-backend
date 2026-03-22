@@ -22,6 +22,12 @@ class Detection(Base):
 
     filename = Column(String, nullable=False)
 
+    # 🔥 NEW: request tracking
+    request_id = Column(String, unique=True, index=True, nullable=False)
+
+    # 🔥 NEW: status tracking (processing/completed/failed)
+    status = Column(String, default="processing", nullable=False)
+
     # Store AI result as JSON
     results = Column(JSON)
 

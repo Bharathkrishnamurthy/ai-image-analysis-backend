@@ -1,7 +1,6 @@
 from app.services.yolo_service import detect_objects
 from app.db.database import SessionLocal
-from app.models.result import Result
-from datetime import datetime
+from app.db.models import Detection   # ✅ FIXED import
 import logging
 import uuid
 
@@ -11,41 +10,41 @@ logger = logging.getLogger(__name__)
 def run_inference_pipeline(image_path: str, user_id: int, filename: str):
     db = SessionLocal()
 
-    # 🔥 Generate job ID (important for tracking)
+    # 🔥 Generate job ID
     request_id = str(uuid.uuid4())
 
+    detection = None  # for safe exception handling
+
     try:
-        # ✅ Step 0: Create initial DB entry (status = processing)
-        db_result = Result(
-            user_id=user_id,
-            image_path=image_path,
+        # ✅ Step 1: Create initial DB entry (processing)
+        detection = Detection(
             filename=filename,
+            user_id=user_id,
             request_id=request_id,
-            status="processing",
-            created_at=datetime.utcnow()
+            status="processing"
         )
 
-        db.add(db_result)
+        db.add(detection)
         db.commit()
-        db.refresh(db_result)
+        db.refresh(detection)
 
-        # 🔥 Step 1: Run YOLO
+        # 🔥 Step 2: Run YOLO
         result = detect_objects(image_path)
 
-        # 🔥 Step 2: Update DB with results
-        db_result.output = result
-        db_result.status = "completed"
+        # 🔥 Step 3: Update result
+        detection.results = result
+        detection.status = "completed"
 
         db.commit()
 
         logger.info(f"✅ Inference completed for {filename}")
 
     except Exception as e:
-        # ❌ Update DB with failure
-        db_result.status = "failed"
-        db_result.output = {"error": str(e)}
-
-        db.commit()
+        # ❌ Handle failure safely
+        if detection:
+            detection.status = "failed"
+            detection.results = {"error": str(e)}
+            db.commit()
 
         logger.error(f"❌ Pipeline failed: {str(e)}")
 
