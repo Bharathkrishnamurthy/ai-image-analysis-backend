@@ -1,4 +1,3 @@
-from ultralytics import YOLO
 import os
 import time
 import logging
@@ -7,15 +6,16 @@ logger = logging.getLogger(__name__)
 
 MODEL_PATH = os.getenv("MODEL_PATH", "yolov8n.pt")
 
-print("🚀 Loading YOLO model...")
-model = YOLO(MODEL_PATH)
-print("✅ YOLO model loaded successfully")
-
 
 def detect_objects(image_path: str):
     start_time = time.time()
 
     try:
+        # ✅ IMPORT + LOAD INSIDE FUNCTION (CRITICAL FIX)
+        from ultralytics import YOLO
+
+        model = YOLO(MODEL_PATH)
+
         results = model(image_path)
 
         detections = []
@@ -41,8 +41,5 @@ def detect_objects(image_path: str):
         }
 
     except Exception as e:
-        logger.error(f"YOLO inference failed: {str(e)}")
-        return {
-            "error": "Inference failed",
-            "details": str(e)
-        }
+        logger.error(f"YOLO failed: {str(e)}")
+        return {"error": str(e)}
