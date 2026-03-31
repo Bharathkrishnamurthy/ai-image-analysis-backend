@@ -12,13 +12,14 @@ import os
 import uuid
 from datetime import datetime
 
+# ❌ REMOVE prefix here
 router = APIRouter()
 
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
-# 🚀 PREDICT (HYBRID: instant + async)
+# 🚀 PREDICT
 @router.post("/predict")
 def predict_image(
     file: UploadFile = File(...),
@@ -26,128 +27,109 @@ def predict_image(
     current_user=Depends(get_current_user)
 ):
     try:
-        # ✅ Validate file
         if file.content_type not in ["image/jpeg", "image/png"]:
             raise HTTPException(status_code=400, detail="Invalid file type")
 
-        # ✅ Generate unique identifiers
         filename = f"{uuid.uuid4()}_{file.filename}"
         request_id = str(uuid.uuid4())
         file_path = os.path.join(UPLOAD_FOLDER, filename)
 
-        # ✅ Save file safely
-        try:
-            file.file.seek(0)
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="File save failed")
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
-        # ⚡ QUICK DETECTION (instant response)
+        # Preview
         try:
-            quick_result = detect_objects(file_path)
+            quick_objects = detect_objects(file_path)
+            quick_summary = {
+                "total_objects": len(quick_objects),
+                "objects": quick_objects,
+                "processing_time": 0.1
+            }
         except Exception as e:
-            quick_result = {
+            print("YOLO ERROR:", e)
+            quick_summary = {
                 "total_objects": 0,
                 "objects": [],
-                "processing_time_seconds": 0
+                "processing_time": 0
             }
 
-        # ✅ Create DB entry
+        # Save DB
         detection = Detection(
             filename=filename,
             request_id=request_id,
+            image_path=file_path,
             status="processing",
-            results=None,
+            results=quick_summary,
             user_id=current_user.id,
             created_at=datetime.utcnow()
         )
 
         db.add(detection)
         db.commit()
+        db.refresh(detection)
 
-        # 🔄 Background processing (Celery)
+        # Celery (safe)
         try:
             run_inference_task.delay(file_path, request_id)
+            celery_status = "queued"
         except Exception as e:
-            # fallback: mark failed if celery not running
-            detection.status = "failed"
-            db.commit()
+            print("CELERY ERROR:", e)
+            celery_status = "failed_to_queue"
 
         return {
             "message": "Processing started 🚀",
             "request_id": request_id,
-            "status": detection.status,
-            "summary": {
-                "total_objects": quick_result.get("total_objects", 0),
-                "objects": [obj.get("label") for obj in quick_result.get("objects", [])],
-                "processing_time": quick_result.get("processing_time_seconds", 0)
-            }
+            "status": celery_status,
+            "preview": quick_summary
         }
 
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Upload failed")
+        print("UPLOAD ERROR:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# 🔍 RESULT (full data)
+# 🔍 RESULT
 @router.get("/result/{request_id}")
 def get_result(
     request_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user)
 ):
-    try:
-        detection = db.query(Detection).filter(
-            Detection.request_id == request_id,
-            Detection.user_id == current_user.id
-        ).first()
+    detection = db.query(Detection).filter(
+        Detection.request_id == request_id,
+        Detection.user_id == current_user.id
+    ).first()
 
-        if not detection:
-            raise HTTPException(status_code=404, detail="Not found")
+    if not detection:
+        raise HTTPException(status_code=404, detail="Not found")
 
-        return {
-            "request_id": detection.request_id,
-            "status": detection.status,
-            "results": detection.results if detection.results else {}
-        }
-
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to fetch result")
+    return {
+        "request_id": detection.request_id,
+        "status": detection.status,
+        "result": detection.results or {}
+    }
 
 
-# 📊 HISTORY (with summary)
+# 📊 HISTORY (THIS WILL NOW SHOW IN SWAGGER)
 @router.get("/history")
 def get_history(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user)
 ):
-    try:
-        detections = db.query(Detection).filter(
-            Detection.user_id == current_user.id
-        ).order_by(Detection.created_at.desc()).all()
+    detections = db.query(Detection).filter(
+        Detection.user_id == current_user.id
+    ).order_by(Detection.created_at.desc()).all()
 
-        history_data = []
-
-        for d in detections:
-            results = d.results if d.results else {}
-
-            history_data.append({
+    return {
+        "count": len(detections),
+        "data": [
+            {
                 "request_id": d.request_id,
                 "filename": d.filename,
                 "status": d.status,
-                "summary": {
-                    "total_objects": results.get("total_objects"),
-                    "objects": [obj.get("label") for obj in results.get("objects", [])],
-                    "processing_time": results.get("processing_time_seconds")
-                },
+                "result": d.results or {},
                 "created_at": d.created_at
-            })
-
-        return history_data
-
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to fetch history")
+            }
+            for d in detections
+        ]
+    }

@@ -1,49 +1,125 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
-from passlib.context import CryptContext
 
-from app.db.database import get_db
-from app.models.user import User
-from app.auth.schemas import UserCreate, UserLogin
-from app.auth.utils import create_access_token
+from app.auth.dependencies import get_current_user
+from app.db.connection import get_db
+from app.db.models import Detection   # ✅ FIXED IMPORT
+from app.tasks.inference_task import run_inference_task
+from app.services.yolo_service import detect_objects
+
+import shutil
+import os
+import uuid
+from datetime import datetime
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
-# 🔥 REGISTER
-@router.post("/register")
-def register(user: UserCreate, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(User.email == user.email).first()
+# ✅ PREDICT
+@router.post("/predict")
+def predict_image(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    try:
+        if file.content_type not in ["image/jpeg", "image/png"]:
+            raise HTTPException(status_code=400, detail="Invalid file type")
 
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+        request_id = str(uuid.uuid4())
+        filename = f"{request_id}_{file.filename}"
+        file_path = os.path.join(UPLOAD_FOLDER, filename)
 
-    hashed_password = pwd_context.hash(user.password)
+        # Save file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
-    new_user = User(
-        email=user.email,
-        hashed_password=hashed_password
-    )
+        # ✅ Quick detection
+        try:
+            objs = detect_objects(file_path)
+            quick_summary = {
+                "total_objects": len(objs),
+                "objects": objs,
+                "processing_time": 0.1
+            }
+        except Exception:
+            quick_summary = {
+                "total_objects": 0,
+                "objects": [],
+                "processing_time": 0
+            }
 
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+        # ✅ SAVE TO DB (FIXED FIELD NAME)
+        detection = Detection(
+            request_id=request_id,
+            user_id=current_user.id,
+            filename=filename,
+            image_path=file_path,
+            status="processing",
+            results=quick_summary,   # ✅ FIXED (NO json.dumps)
+            created_at=datetime.utcnow()
+        )
 
-    return {"message": "User registered successfully"}
+        db.add(detection)
+        db.commit()
+
+        # ✅ Trigger celery
+        run_inference_task.delay(file_path, request_id)
+
+        return {
+            "message": "Processing started 🚀",
+            "request_id": request_id,
+            "status": "processing",
+            "preview": quick_summary
+        }
+
+    except Exception as e:
+        print("ERROR:", e)
+        raise HTTPException(status_code=500, detail="Upload failed")
 
 
-# 🔥 LOGIN
-@router.post("/login")
-def login(user: UserLogin, db: Session = Depends(get_db)):
-    db_user = db.query(User).filter(User.email == user.email).first()
+# ✅ RESULT
+@router.get("/result/{request_id}")
+def get_result(
+    request_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    detection = db.query(Detection).filter(
+        Detection.request_id == request_id,
+        Detection.user_id == current_user.id
+    ).first()
 
-    if not db_user:
-        raise HTTPException(status_code=400, detail="Invalid credentials")
+    if not detection:
+        raise HTTPException(status_code=404, detail="Not found")
 
-    if not pwd_context.verify(user.password, db_user.hashed_password):
-        raise HTTPException(status_code=400, detail="Invalid credentials")
+    return {
+        "request_id": detection.request_id,
+        "status": detection.status,
+        "result": detection.results or {}   # ✅ FIXED
+    }
 
-    access_token = create_access_token(data={"sub": db_user.email})
 
-    return {"access_token": access_token, "token_type": "bearer"}
+# ✅ HISTORY
+@router.get("/history")
+def get_history(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    detections = db.query(Detection).filter(
+        Detection.user_id == current_user.id
+    ).order_by(Detection.created_at.desc()).all()
+
+    return [
+        {
+            "request_id": d.request_id,
+            "filename": d.filename,
+            "status": d.status,
+            "result": d.results or {},   # ✅ FIXED
+            "created_at": d.created_at
+        }
+        for d in detections
+    ]

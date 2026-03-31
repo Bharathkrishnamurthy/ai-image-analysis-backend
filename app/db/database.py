@@ -3,24 +3,32 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 import os
 from dotenv import load_dotenv
 
-# 🔥 Load .env file (IMPORTANT)
+# 🔥 Load .env
 load_dotenv()
 
 # 🔥 Get DATABASE_URL
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# ✅ Fallback to SQLite if not set (VERY IMPORTANT)
 if not DATABASE_URL:
-    raise ValueError("❌ DATABASE_URL environment variable is not set")
+    print("⚠️ DATABASE_URL not found, using SQLite fallback")
+    DATABASE_URL = "sqlite:///./test.db"
 
-# 🔥 Fix for Render + Postgres (important)
+# 🔥 Fix for Render / old postgres URL
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# 🔥 Special handling for SQLite
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
 
 # 🔥 Create engine
 engine = create_engine(
     DATABASE_URL,
     echo=True,
-    pool_pre_ping=True  # ✅ avoids stale connections
+    pool_pre_ping=True,
+    connect_args=connect_args
 )
 
 # 🔥 Session
@@ -30,7 +38,7 @@ SessionLocal = sessionmaker(
     bind=engine
 )
 
-# 🔥 Base model
+# 🔥 Base
 Base = declarative_base()
 
-print("✅ Database configuration loaded")
+print(f"✅ Database connected using: {DATABASE_URL}")
