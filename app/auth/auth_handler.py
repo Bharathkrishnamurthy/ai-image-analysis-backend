@@ -1,11 +1,13 @@
+import os
 from datetime import datetime, timedelta
 from jose import jwt
 from passlib.context import CryptContext
 
 from app.db.connection import SessionLocal
-from app.db.models import User   # ✅ FIXED IMPORT
+from app.db.models import User
 
-SECRET_KEY = "supersecretkey"
+# 🔐 Load SECRET_KEY from environment (Render)
+SECRET_KEY = os.getenv("SECRET_KEY", "fallback_secret_key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
@@ -34,7 +36,7 @@ def authenticate_user(username: str, password: str):
         db.close()
 
 
-# ✅ CREATE TOKEN (FIXED)
+# ✅ CREATE TOKEN
 def create_access_token(data: dict):
     to_encode = data.copy()
 
@@ -42,7 +44,7 @@ def create_access_token(data: dict):
 
     to_encode.update({
         "exp": expire,
-        "sub": data.get("username")   # ✅ CRITICAL FIX
+        "sub": data.get("username")   # important for JWT subject
     })
 
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
