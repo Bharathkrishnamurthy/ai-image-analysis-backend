@@ -6,8 +6,11 @@ from passlib.context import CryptContext
 from app.db.connection import SessionLocal
 from app.db.models import User
 
-# 🔐 Load SECRET_KEY from environment (Render)
-SECRET_KEY = os.getenv("SECRET_KEY", "fallback_secret_key")
+# 🔐 STRICT SECRET KEY (no silent fallback)
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError("❌ SECRET_KEY not set in environment variables")
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
@@ -44,7 +47,7 @@ def create_access_token(data: dict):
 
     to_encode.update({
         "exp": expire,
-        "sub": data.get("username")   # important for JWT subject
+        "sub": data.get("username")
     })
 
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
