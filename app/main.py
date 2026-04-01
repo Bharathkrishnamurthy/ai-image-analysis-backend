@@ -11,26 +11,66 @@ from app.db.connection import engine
 from app.db.models import Base
 
 
-# ✅ Lifespan (replaces deprecated startup event)
+# ✅ Lifespan (startup + migration)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Starting up...")
 
-    # ✅ Ensure DB tables exist
+    # ✅ Create tables
     try:
         Base.metadata.create_all(bind=engine)
         print("✅ Tables created")
     except Exception as e:
         print("❌ Table creation error:", e)
 
-    # ✅ Safe migration (column auto-add)
+    # ✅ SAFE MIGRATIONS (🔥 ALL REQUIRED COLUMNS)
     try:
         with engine.begin() as conn:
+
+            # request_id
             conn.execute(text("""
                 ALTER TABLE detections
                 ADD COLUMN IF NOT EXISTS request_id VARCHAR;
             """))
-        print("✅ Migration checked")
+
+            # 🔥 FIX YOUR ERROR
+            conn.execute(text("""
+                ALTER TABLE detections
+                ADD COLUMN IF NOT EXISTS image_path VARCHAR;
+            """))
+
+            # filename (safety)
+            conn.execute(text("""
+                ALTER TABLE detections
+                ADD COLUMN IF NOT EXISTS filename VARCHAR;
+            """))
+
+            # status
+            conn.execute(text("""
+                ALTER TABLE detections
+                ADD COLUMN IF NOT EXISTS status VARCHAR;
+            """))
+
+            # results (JSON)
+            conn.execute(text("""
+                ALTER TABLE detections
+                ADD COLUMN IF NOT EXISTS results JSON;
+            """))
+
+            # created_at
+            conn.execute(text("""
+                ALTER TABLE detections
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
+            """))
+
+            # user_id
+            conn.execute(text("""
+                ALTER TABLE detections
+                ADD COLUMN IF NOT EXISTS user_id INTEGER;
+            """))
+
+        print("✅ All migrations applied")
+
     except Exception as e:
         print("⚠️ Migration error:", e)
 
@@ -47,7 +87,7 @@ async def lifespan(app: FastAPI):
     print("🛑 Shutting down...")
 
 
-# ✅ Create app
+# ✅ App
 app = FastAPI(
     title="AI Image Analysis API",
     version="1.0.0",
@@ -55,10 +95,10 @@ app = FastAPI(
 )
 
 
-# ✅ CORS (fix later for production)
+# ✅ CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ⚠️ change in production
+    allow_origins=["*"],  # ⚠️ restrict in production later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -77,7 +117,7 @@ def root():
     return {"message": "API running"}
 
 
-# ✅ Health check (important for debugging)
+# ✅ Health check
 @app.get("/health")
 def health_check():
     try:
