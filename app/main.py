@@ -5,7 +5,7 @@ from app.api.routes import router as image_router
 from app.api.auth_routes import router as auth_router
 from app.api.task_routes import router as task_router
 
-from app.db.database import engine
+from app.db.connection import engine   # ✅ FIXED
 from app.db.models import Base
 
 app = FastAPI(
