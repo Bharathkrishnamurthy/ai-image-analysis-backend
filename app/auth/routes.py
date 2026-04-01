@@ -3,9 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.db.connection import get_db
-from app.db.models import Detection   # ✅ FIXED IMPORT
-from app.tasks.inference_task import run_inference_task
-from app.services.yolo_service import detect_objects
+from app.db.models import Detection
 
 import shutil
 import os
@@ -16,6 +14,25 @@ router = APIRouter()
 
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+
+# 🔥 SAFE CELERY CALL (NO CRASH ON RENDER)
+def run_task_safe(file_path, request_id):
+    try:
+        from app.tasks.inference_task import run_inference_task
+        run_inference_task.delay(file_path, request_id)
+    except Exception as e:
+        print("Celery not available:", e)
+
+
+# 🔥 SAFE YOLO CALL
+def detect_safe(file_path):
+    try:
+        from app.services.yolo_service import detect_objects
+        return detect_objects(file_path)
+    except Exception as e:
+        print("YOLO ERROR:", e)
+        return []
 
 
 # ✅ PREDICT
@@ -37,37 +54,31 @@ def predict_image(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # ✅ Quick detection
-        try:
-            objs = detect_objects(file_path)
-            quick_summary = {
-                "total_objects": len(objs),
-                "objects": objs,
-                "processing_time": 0.1
-            }
-        except Exception:
-            quick_summary = {
-                "total_objects": 0,
-                "objects": [],
-                "processing_time": 0
-            }
+        # ✅ SAFE detection
+        objs = detect_safe(file_path)
 
-        # ✅ SAVE TO DB (FIXED FIELD NAME)
+        quick_summary = {
+            "total_objects": len(objs),
+            "objects": objs,
+            "processing_time": 0.1
+        }
+
+        # ✅ SAVE TO DB
         detection = Detection(
             request_id=request_id,
             user_id=current_user.id,
             filename=filename,
             image_path=file_path,
             status="processing",
-            results=quick_summary,   # ✅ FIXED (NO json.dumps)
+            results=quick_summary,
             created_at=datetime.utcnow()
         )
 
         db.add(detection)
         db.commit()
 
-        # ✅ Trigger celery
-        run_inference_task.delay(file_path, request_id)
+        # ✅ SAFE CELERY CALL
+        run_task_safe(file_path, request_id)
 
         return {
             "message": "Processing started 🚀",
@@ -99,7 +110,7 @@ def get_result(
     return {
         "request_id": detection.request_id,
         "status": detection.status,
-        "result": detection.results or {}   # ✅ FIXED
+        "result": detection.results or {}
     }
 
 
@@ -118,7 +129,7 @@ def get_history(
             "request_id": d.request_id,
             "filename": d.filename,
             "status": d.status,
-            "result": d.results or {},   # ✅ FIXED
+            "result": d.results or {},
             "created_at": d.created_at
         }
         for d in detections
