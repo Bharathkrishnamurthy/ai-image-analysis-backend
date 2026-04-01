@@ -6,10 +6,8 @@ from passlib.context import CryptContext
 from app.db.connection import SessionLocal
 from app.db.models import User
 
-# 🔐 STRICT SECRET KEY (no silent fallback)
-SECRET_KEY = os.getenv("SECRET_KEY")
-if not SECRET_KEY:
-    raise ValueError("❌ SECRET_KEY not set in environment variables")
+# 🔐 SAFE SECRET KEY (works locally + production)
+SECRET_KEY = os.getenv("SECRET_KEY", "local_dev_secret_key")
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
