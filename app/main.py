@@ -11,7 +11,7 @@ from app.db.connection import engine
 from app.db.models import Base
 
 
-# ✅ Lifespan (startup + migration)
+# 🚀 Lifespan (startup + migration)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Starting up...")
@@ -23,53 +23,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print("❌ Table creation error:", e)
 
-    # ✅ SAFE MIGRATIONS (🔥 ALL REQUIRED COLUMNS)
+    # ✅ Safe migrations
     try:
         with engine.begin() as conn:
+            migrations = [
+                "ADD COLUMN IF NOT EXISTS request_id VARCHAR",
+                "ADD COLUMN IF NOT EXISTS image_path VARCHAR",
+                "ADD COLUMN IF NOT EXISTS filename VARCHAR",
+                "ADD COLUMN IF NOT EXISTS status VARCHAR",
+                "ADD COLUMN IF NOT EXISTS results JSON",
+                "ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+                "ADD COLUMN IF NOT EXISTS user_id INTEGER"
+            ]
 
-            # request_id
-            conn.execute(text("""
-                ALTER TABLE detections
-                ADD COLUMN IF NOT EXISTS request_id VARCHAR;
-            """))
+            for migration in migrations:
+                try:
+                    conn.execute(text(f"ALTER TABLE detections {migration};"))
+                except Exception as e:
+                    print(f"⚠️ Skipping migration: {migration} | Error: {e}")
 
-            # 🔥 FIX YOUR ERROR
-            conn.execute(text("""
-                ALTER TABLE detections
-                ADD COLUMN IF NOT EXISTS image_path VARCHAR;
-            """))
-
-            # filename (safety)
-            conn.execute(text("""
-                ALTER TABLE detections
-                ADD COLUMN IF NOT EXISTS filename VARCHAR;
-            """))
-
-            # status
-            conn.execute(text("""
-                ALTER TABLE detections
-                ADD COLUMN IF NOT EXISTS status VARCHAR;
-            """))
-
-            # results (JSON)
-            conn.execute(text("""
-                ALTER TABLE detections
-                ADD COLUMN IF NOT EXISTS results JSON;
-            """))
-
-            # created_at
-            conn.execute(text("""
-                ALTER TABLE detections
-                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
-            """))
-
-            # user_id
-            conn.execute(text("""
-                ALTER TABLE detections
-                ADD COLUMN IF NOT EXISTS user_id INTEGER;
-            """))
-
-        print("✅ All migrations applied")
+        print("✅ Migrations applied")
 
     except Exception as e:
         print("⚠️ Migration error:", e)
@@ -87,7 +60,7 @@ async def lifespan(app: FastAPI):
     print("🛑 Shutting down...")
 
 
-# ✅ App
+# 🚀 FastAPI app
 app = FastAPI(
     title="AI Image Analysis API",
     version="1.0.0",
@@ -95,29 +68,29 @@ app = FastAPI(
 )
 
 
-# ✅ CORS
+# 🌐 CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ⚠️ restrict in production later
+    allow_origins=["*"],  # ⚠️ restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ✅ Routers
+# 🔗 Routers
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(image_router, prefix="/image", tags=["Image"])
 app.include_router(task_router, prefix="/task", tags=["Task"])
 
 
-# ✅ Root
+# 🏠 Root
 @app.get("/")
 def root():
-    return {"message": "API running"}
+    return {"message": "API running 🚀"}
 
 
-# ✅ Health check
+# ❤️ Health check
 @app.get("/health")
 def health_check():
     try:

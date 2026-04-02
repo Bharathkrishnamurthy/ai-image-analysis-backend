@@ -12,7 +12,6 @@ import os
 import uuid
 from datetime import datetime
 
-# ❌ REMOVE prefix here
 router = APIRouter()
 
 UPLOAD_FOLDER = "uploads"
@@ -34,26 +33,39 @@ def predict_image(
         request_id = str(uuid.uuid4())
         file_path = os.path.join(UPLOAD_FOLDER, filename)
 
+        # Save file
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Preview
-        try:
-            quick_objects = detect_objects(file_path)
-            quick_summary = {
-                "total_objects": len(quick_objects),
-                "objects": quick_objects,
-                "processing_time": 0.1
-            }
-        except Exception as e:
-            print("YOLO ERROR:", e)
-            quick_summary = {
-                "total_objects": 0,
-                "objects": [],
-                "processing_time": 0
-            }
+        # ✅ REAL PREVIEW
+        preview_result = detect_objects(file_path, confidence_threshold=0.3)
 
-        # Save DB
+        detections = preview_result.get("detections", [])
+
+        # ✅ Objects
+        objects = [
+            {
+                "object": d["label"],
+                "confidence": f"{round(d['confidence'] * 100, 2)}%"
+            }
+            for d in detections
+        ]
+
+        # 🔥 Analytics
+        analytics = {}
+        for d in detections:
+            label = d["label"]
+            analytics[label] = analytics.get(label, 0) + 1
+
+        analytics = dict(sorted(analytics.items(), key=lambda x: x[1], reverse=True))
+
+        quick_summary = {
+            "total_objects": preview_result.get("total_objects", 0),
+            "objects": objects,
+            "analytics": analytics,  # 🔥 NEW
+            "processing_time": preview_result.get("processing_time", 0)
+        }
+
         detection = Detection(
             filename=filename,
             request_id=request_id,
@@ -68,7 +80,7 @@ def predict_image(
         db.commit()
         db.refresh(detection)
 
-        # Celery (safe)
+        # Celery trigger
         try:
             run_inference_task.delay(file_path, request_id)
             celery_status = "queued"
@@ -110,7 +122,7 @@ def get_result(
     }
 
 
-# 📊 HISTORY (THIS WILL NOW SHOW IN SWAGGER)
+# 📊 HISTORY
 @router.get("/history")
 def get_history(
     db: Session = Depends(get_db),

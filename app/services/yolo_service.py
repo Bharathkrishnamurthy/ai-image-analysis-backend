@@ -4,9 +4,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MODEL_PATH = os.getenv("MODEL_PATH", "yolov8n.pt")
-
-# ✅ GLOBAL MODEL (lazy load)
+MODEL_PATH = os.getenv("MODEL_PATH", "yolov8m.pt")
 model = None
 
 
@@ -19,17 +17,15 @@ def get_model():
     return model
 
 
-def detect_objects(image_path: str, confidence_threshold: float = 0.5):
+def detect_objects(image_path: str, confidence_threshold: float = 0.3):
     start_time = time.time()
 
     try:
         if not os.path.exists(image_path):
             return {"error": f"Image not found: {image_path}"}
 
-        # ✅ load once
         model = get_model()
 
-        # ✅ optimized inference
         results = model.predict(image_path, conf=confidence_threshold, verbose=False)
 
         detections = []

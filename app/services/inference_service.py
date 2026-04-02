@@ -1,6 +1,6 @@
 from app.services.yolo_service import detect_objects
-from app.db.database import SessionLocal
-from app.models.detection import Detection  # ✅ FIXED IMPORT
+from app.db.connection import SessionLocal
+from app.db.models import Detection
 
 import logging
 import time
@@ -14,7 +14,6 @@ def run_inference_pipeline(image_path: str, request_id: str):
     try:
         logger.info(f"🚀 Starting inference for {request_id}")
 
-        # 🔍 Get record
         detection = db.query(Detection).filter(
             Detection.request_id == request_id
         ).first()
@@ -26,27 +25,30 @@ def run_inference_pipeline(image_path: str, request_id: str):
         start_time = time.time()
 
         # 🔥 Run YOLO
-        result = detect_objects(image_path)
+        raw_result = detect_objects(image_path)
 
         end_time = time.time()
 
-        # ✅ Normalize result
-        if "error" in result:
-            detection.status = "failed"
-            detection.results = {
-                "total_objects": 0,
-                "detections": [],
-                "processing_time": 0,
-                "error": result["error"]
-            }
-        else:
-            detection.status = "completed"
-            detection.results = result
+        # ✅ Convert to simple user-friendly format
+        objects_list = []
+        for obj in raw_result:
+            objects_list.append({
+                "object": obj.get("label", "unknown"),
+                "confidence": f"{round(obj.get('confidence', 0) * 100, 2)}%"
+            })
+
+        detection.status = "completed"
+        detection.results = {
+            "summary": f"Detected {len(objects_list)} object(s) in the image",
+            "total_objects": len(objects_list),
+            "objects": objects_list,
+            "processing_time": f"{round(end_time - start_time, 2)} seconds"
+        }
 
         db.commit()
         db.refresh(detection)
 
-        logger.info(f"✅ Inference completed for {request_id} in {round(end_time - start_time, 3)}s")
+        logger.info(f"✅ Inference completed for {request_id}")
 
     except Exception as e:
         logger.error(f"❌ Pipeline failed: {str(e)}")
@@ -58,9 +60,7 @@ def run_inference_pipeline(image_path: str, request_id: str):
         if detection:
             detection.status = "failed"
             detection.results = {
-                "total_objects": 0,
-                "detections": [],
-                "processing_time": 0,
+                "summary": "Processing failed",
                 "error": str(e)
             }
             db.commit()
