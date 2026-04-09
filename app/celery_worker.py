@@ -1,17 +1,32 @@
 from celery import Celery
 import os
 
-# ✅ Use env variable (better for Docker / deployment)
-REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+# ✅ Get Redis URL (NO fallback to local)
+REDIS_URL = os.getenv("REDIS_URL")
+
+if not REDIS_URL:
+    raise ValueError("❌ REDIS_URL is not set in environment variables")
+
+# ✅ Force secure connection (important for Upstash)
+if REDIS_URL.startswith("redis://"):
+    REDIS_URL = REDIS_URL.replace("redis://", "rediss://")
 
 celery_app = Celery(
     "app",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["app.tasks.inference_task"]  # make sure this path is correct
+    include=["app.tasks.inference_task"]
 )
 
-# ✅ Robust configuration
+# ✅ SSL config (CRITICAL for Upstash)
+celery_app.conf.broker_use_ssl = {
+    "ssl_cert_reqs": "none"
+}
+celery_app.conf.redis_backend_use_ssl = {
+    "ssl_cert_reqs": "none"
+}
+
+# ✅ Optimized configuration
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -19,16 +34,16 @@ celery_app.conf.update(
     timezone="Asia/Kolkata",
     enable_utc=True,
 
-    # 🔥 Critical fixes
-    broker_connection_retry_on_startup=True,   # retry if Redis not ready
+    broker_connection_retry_on_startup=True,
     broker_connection_retry=True,
     broker_connection_max_retries=10,
 
-    # 🔥 Prevent hanging tasks
     task_acks_late=True,
     worker_prefetch_multiplier=1,
 
-    # 🔥 Time limits (optional but good)
     task_time_limit=300,
     task_soft_time_limit=240,
+
+    # 🔥 VERY IMPORTANT (avoid memory crash)
+    worker_concurrency=1
 )

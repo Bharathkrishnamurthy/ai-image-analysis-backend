@@ -5,7 +5,6 @@ from app.auth.dependencies import get_current_user
 from app.db.connection import get_db
 from app.db.models import Detection
 from app.tasks.inference_task import run_inference_task
-from app.services.yolo_service import detect_objects
 
 import shutil
 import os
@@ -18,7 +17,7 @@ UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
-# 🚀 PREDICT
+# 🚀 PREDICT (LIGHTWEIGHT NOW)
 @router.post("/predict")
 def predict_image(
     file: UploadFile = File(...),
@@ -33,45 +32,17 @@ def predict_image(
         request_id = str(uuid.uuid4())
         file_path = os.path.join(UPLOAD_FOLDER, filename)
 
-        # Save file
+        # ✅ Save file
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # ✅ REAL PREVIEW
-        preview_result = detect_objects(file_path, confidence_threshold=0.3)
-
-        detections = preview_result.get("detections", [])
-
-        # ✅ Objects
-        objects = [
-            {
-                "object": d["label"],
-                "confidence": f"{round(d['confidence'] * 100, 2)}%"
-            }
-            for d in detections
-        ]
-
-        # 🔥 Analytics
-        analytics = {}
-        for d in detections:
-            label = d["label"]
-            analytics[label] = analytics.get(label, 0) + 1
-
-        analytics = dict(sorted(analytics.items(), key=lambda x: x[1], reverse=True))
-
-        quick_summary = {
-            "total_objects": preview_result.get("total_objects", 0),
-            "objects": objects,
-            "analytics": analytics,  # 🔥 NEW
-            "processing_time": preview_result.get("processing_time", 0)
-        }
-
+        # ✅ Store initial DB entry
         detection = Detection(
             filename=filename,
             request_id=request_id,
             image_path=file_path,
-            status="processing",
-            results=quick_summary,
+            status="queued",  # 🔥 changed
+            results=None,     # 🔥 no preview now
             user_id=current_user.id,
             created_at=datetime.utcnow()
         )
@@ -80,7 +51,7 @@ def predict_image(
         db.commit()
         db.refresh(detection)
 
-        # Celery trigger
+        # ✅ Trigger Celery task
         try:
             run_inference_task.delay(file_path, request_id)
             celery_status = "queued"
@@ -91,8 +62,7 @@ def predict_image(
         return {
             "message": "Processing started 🚀",
             "request_id": request_id,
-            "status": celery_status,
-            "preview": quick_summary
+            "status": celery_status
         }
 
     except Exception as e:
