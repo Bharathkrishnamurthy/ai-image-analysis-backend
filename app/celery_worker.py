@@ -1,13 +1,13 @@
 from celery import Celery
 import os
 
-# ✅ Get Redis URL (NO fallback to local)
+# ✅ Get Redis URL
 REDIS_URL = os.getenv("REDIS_URL")
 
 if not REDIS_URL:
     raise ValueError("❌ REDIS_URL is not set in environment variables")
 
-# ✅ Force secure connection (important for Upstash)
+# ✅ Force secure connection (Upstash requires TLS)
 if REDIS_URL.startswith("redis://"):
     REDIS_URL = REDIS_URL.replace("redis://", "rediss://")
 
@@ -18,15 +18,11 @@ celery_app = Celery(
     include=["app.tasks.inference_task"]
 )
 
-# ✅ SSL config (CRITICAL for Upstash)
-celery_app.conf.broker_use_ssl = {
-    "ssl_cert_reqs": "none"
-}
-celery_app.conf.redis_backend_use_ssl = {
-    "ssl_cert_reqs": "none"
-}
+# ✅ SSL config (IMPORTANT for Upstash)
+celery_app.conf.broker_use_ssl = {"ssl_cert_reqs": "none"}
+celery_app.conf.redis_backend_use_ssl = {"ssl_cert_reqs": "none"}
 
-# ✅ Optimized configuration
+# ✅ FINAL CONFIG (queue + stability)
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -44,6 +40,8 @@ celery_app.conf.update(
     task_time_limit=300,
     task_soft_time_limit=240,
 
-    # 🔥 VERY IMPORTANT (avoid memory crash)
-    worker_concurrency=1
+    worker_concurrency=1,
+
+    # 🔥 CRITICAL FIX (queue issue)
+    task_default_queue="celery",
 )

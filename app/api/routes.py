@@ -6,18 +6,23 @@ from app.db.connection import get_db
 from app.db.models import Detection
 from app.tasks.inference_task import run_inference_task
 
-import shutil
+import cloudinary
+import cloudinary.uploader
 import os
 import uuid
 from datetime import datetime
 
 router = APIRouter()
 
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# ✅ Cloudinary config
+cloudinary.config(
+    cloud_name=os.getenv("CLOUD_NAME"),
+    api_key=os.getenv("API_KEY"),
+    api_secret=os.getenv("API_SECRET")
+)
 
 
-# 🚀 PREDICT (LIGHTWEIGHT NOW)
+# 🚀 PREDICT (WITH PREVIEW)
 @router.post("/predict")
 def predict_image(
     file: UploadFile = File(...),
@@ -30,19 +35,26 @@ def predict_image(
 
         filename = f"{uuid.uuid4()}_{file.filename}"
         request_id = str(uuid.uuid4())
-        file_path = os.path.join(UPLOAD_FOLDER, filename)
 
-        # ✅ Save file
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # ✅ Upload to Cloudinary
+        upload_result = cloudinary.uploader.upload(file.file)
+        image_url = upload_result.get("secure_url")
 
-        # ✅ Store initial DB entry
+        if not image_url:
+            raise HTTPException(status_code=500, detail="Cloud upload failed")
+
+        # 🔥 OPTIONAL PREVIEW (light detection)
+        preview_result = {
+            "message": "Preview unavailable (processed asynchronously)"
+        }
+
+        # ✅ Store DB entry
         detection = Detection(
             filename=filename,
             request_id=request_id,
-            image_path=file_path,
-            status="queued",  # 🔥 changed
-            results=None,     # 🔥 no preview now
+            image_path=image_url,
+            status="queued",
+            results=None,
             user_id=current_user.id,
             created_at=datetime.utcnow()
         )
@@ -51,18 +63,15 @@ def predict_image(
         db.commit()
         db.refresh(detection)
 
-        # ✅ Trigger Celery task
-        try:
-            run_inference_task.delay(file_path, request_id)
-            celery_status = "queued"
-        except Exception as e:
-            print("CELERY ERROR:", e)
-            celery_status = "failed_to_queue"
+        # ✅ Trigger Celery
+        run_inference_task.delay(image_url, request_id)
 
         return {
             "message": "Processing started 🚀",
             "request_id": request_id,
-            "status": celery_status
+            "status": "queued",
+            "preview": preview_result,
+            "image_url": image_url
         }
 
     except Exception as e:
@@ -70,7 +79,7 @@ def predict_image(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 🔍 RESULT
+# 🔍 RESULT (FULL OUTPUT)
 @router.get("/result/{request_id}")
 def get_result(
     request_id: str,
@@ -110,6 +119,7 @@ def get_history(
                 "filename": d.filename,
                 "status": d.status,
                 "result": d.results or {},
+                "image_url": d.image_path,
                 "created_at": d.created_at
             }
             for d in detections

@@ -10,6 +10,17 @@ from app.api.task_routes import router as task_router
 from app.db.connection import engine
 from app.db.models import Base
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+print("CLOUD:", os.getenv("CLOUD_NAME"))
+print("API_KEY:", os.getenv("API_KEY"))
+print("API_SECRET:", os.getenv("API_SECRET"))
+print("REDIS_URL:", os.getenv("REDIS_URL"))
+
+
 
 # 🚀 Lifespan (startup + migration)
 @asynccontextmanager

@@ -5,29 +5,55 @@ from app.db.models import Detection
 import logging
 import time
 import traceback
+import os
+import requests
+import tempfile
 
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(bind=True, autoretry_for=(Exception,), retry_backoff=5, retry_kwargs={"max_retries": 3})
-def run_inference_task(self, file_path, request_id):
-    db = SessionLocal()
+# ✅ Download image from URL (Cloudinary)
+def download_image(url):
+    response = requests.get(url)
+    response.raise_for_status()
 
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+    temp_file.write(response.content)
+    temp_file.close()
+
+    return temp_file.name
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.inference_task.run_inference_task",
+    autoretry_for=(Exception,),
+    retry_backoff=5,
+    retry_kwargs={"max_retries": 3}
+)
+def run_inference_task(self, image_url, request_id):
+    db = SessionLocal()
     detection = None
 
     try:
         from app.services.yolo_service import detect_objects
 
         logger.info(f"🔥 TASK STARTED: {request_id}")
+        logger.info(f"🌐 IMAGE URL: {image_url}")
+
+        # ✅ STEP 1: Download image
+        local_path = download_image(image_url)
+        logger.info(f"📥 Image downloaded to: {local_path}")
 
         start_time = time.time()
 
-        raw_result = detect_objects(file_path)
-
+        # ✅ STEP 2: Run YOLO
+        raw_result = detect_objects(local_path)
         logger.info(f"🧠 RAW YOLO OUTPUT: {raw_result}")
 
         end_time = time.time()
 
+        # ✅ STEP 3: Fetch DB record
         detection = db.query(Detection).filter(
             Detection.request_id == request_id
         ).first()
@@ -39,31 +65,29 @@ def run_inference_task(self, file_path, request_id):
         # ✅ Extract detections
         detections = raw_result.get("detections", [])
 
-        # ✅ Objects list
+        # ✅ Format objects
         objects_list = [
             {
                 "object": d["label"],
-                "confidence": f"{round(d['confidence'] * 100, 2)}%",
-                "bbox": d.get("bbox")
+                "confidence": f"{round(d['confidence'] * 100, 2)}%"
             }
             for d in detections
         ]
 
-        # 🔥 NEW: Analytics grouping
+        # ✅ Analytics (frequency count)
         analytics = {}
         for d in detections:
             label = d["label"]
             analytics[label] = analytics.get(label, 0) + 1
 
-        # (optional sort)
         analytics = dict(sorted(analytics.items(), key=lambda x: x[1], reverse=True))
 
-        # ✅ Final result
+        # ✅ Save result
         detection.results = {
             "summary": f"Detected {raw_result.get('total_objects', 0)} object(s)",
             "total_objects": raw_result.get("total_objects", 0),
             "objects": objects_list,
-            "analytics": analytics,  # 🔥 NEW FIELD
+            "analytics": analytics,
             "processing_time": f"{round(end_time - start_time, 2)} seconds",
             "status": "success"
         }
