@@ -1,5 +1,9 @@
 from celery import Celery
 import os
+from dotenv import load_dotenv
+
+# 🔥 LOAD ENV VARIABLES (VERY IMPORTANT)
+load_dotenv()
 
 # ✅ Get Redis URL
 REDIS_URL = os.getenv("REDIS_URL")
@@ -22,7 +26,7 @@ celery_app = Celery(
 celery_app.conf.broker_use_ssl = {"ssl_cert_reqs": "none"}
 celery_app.conf.redis_backend_use_ssl = {"ssl_cert_reqs": "none"}
 
-# ✅ FINAL CONFIG (queue + stability)
+# ✅ FINAL CONFIG
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -42,6 +46,6 @@ celery_app.conf.update(
 
     worker_concurrency=1,
 
-    # 🔥 CRITICAL FIX (queue issue)
+    # 🔥 Queue fix
     task_default_queue="celery",
 )

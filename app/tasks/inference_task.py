@@ -5,16 +5,16 @@ from app.db.models import Detection
 import logging
 import time
 import traceback
-import os
 import requests
 import tempfile
+import os
 
 logger = logging.getLogger(__name__)
 
 
 # ✅ Download image from URL (Cloudinary)
 def download_image(url):
-    response = requests.get(url)
+    response = requests.get(url, timeout=30)  # 🔥 add timeout
     response.raise_for_status()
 
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
@@ -34,6 +34,7 @@ def download_image(url):
 def run_inference_task(self, image_url, request_id):
     db = SessionLocal()
     detection = None
+    local_path = None
 
     try:
         from app.services.yolo_service import detect_objects
@@ -49,6 +50,11 @@ def run_inference_task(self, image_url, request_id):
 
         # ✅ STEP 2: Run YOLO
         raw_result = detect_objects(local_path)
+
+        # 🔥 HANDLE ERROR CASE
+        if "error" in raw_result:
+            raise Exception(raw_result["error"])
+
         logger.info(f"🧠 RAW YOLO OUTPUT: {raw_result}")
 
         end_time = time.time()
@@ -74,7 +80,7 @@ def run_inference_task(self, image_url, request_id):
             for d in detections
         ]
 
-        # ✅ Analytics (frequency count)
+        # ✅ Analytics
         analytics = {}
         for d in detections:
             label = d["label"]
@@ -128,4 +134,9 @@ def run_inference_task(self, image_url, request_id):
         raise self.retry(exc=e)
 
     finally:
+        # 🔥 CLEANUP TEMP FILE
+        if local_path and os.path.exists(local_path):
+            os.remove(local_path)
+            logger.info(f"🧹 Temp file deleted: {local_path}")
+
         db.close()
