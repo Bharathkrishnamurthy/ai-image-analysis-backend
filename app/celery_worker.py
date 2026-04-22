@@ -2,7 +2,7 @@ from celery import Celery
 import os
 from dotenv import load_dotenv
 
-# 🔥 LOAD ENV VARIABLES (VERY IMPORTANT)
+# 🔥 LOAD ENV VARIABLES
 load_dotenv()
 
 # ✅ Get Redis URL
@@ -11,20 +11,25 @@ REDIS_URL = os.getenv("REDIS_URL")
 if not REDIS_URL:
     raise ValueError("❌ REDIS_URL is not set in environment variables")
 
-# ✅ Force secure connection (Upstash requires TLS)
+# ✅ Force secure connection (Upstash TLS)
 if REDIS_URL.startswith("redis://"):
     REDIS_URL = REDIS_URL.replace("redis://", "rediss://")
 
+# ✅ Create Celery app
 celery_app = Celery(
     "app",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["app.tasks.inference_task"]
 )
 
-# ✅ SSL config (IMPORTANT for Upstash)
+# 🔥 IMPORTANT: auto-discover tasks (more reliable than include)
+celery_app.autodiscover_tasks(["app.tasks"])
+
+
+# ✅ SSL config (Upstash)
 celery_app.conf.broker_use_ssl = {"ssl_cert_reqs": "none"}
 celery_app.conf.redis_backend_use_ssl = {"ssl_cert_reqs": "none"}
+
 
 # ✅ FINAL CONFIG
 celery_app.conf.update(
@@ -46,6 +51,5 @@ celery_app.conf.update(
 
     worker_concurrency=1,
 
-    # 🔥 Queue fix
     task_default_queue="celery",
 )

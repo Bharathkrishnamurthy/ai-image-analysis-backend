@@ -18,15 +18,25 @@ elif DATABASE_URL.startswith("postgresql://"):
         "postgresql://", "postgresql+psycopg://", 1
     )
 
-# ✅ Create engine (production-ready config)
+# ✅ Detect Supabase (pooler) → enforce SSL
+connect_args = {}
+if "supabase.com" in DATABASE_URL:
+    connect_args = {"sslmode": "require"}   # 🔥 REQUIRED for Supabase
+
+# ✅ Create engine (OPTIMIZED for Supabase)
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,     # 🔥 auto reconnect if DB drops
-    pool_size=5,            # number of persistent connections
-    max_overflow=10,        # extra connections if needed
-    pool_timeout=30,        # wait time before error
-    pool_recycle=1800,      # recycle connections (fixes stale issues)
-    echo=False              # set True for SQL debugging
+    pool_pre_ping=True,
+
+    # 🔥 IMPORTANT FIX (reduce connections → avoid circuit breaker)
+    pool_size=3,          # was 5 → reduced
+    max_overflow=2,       # was 10 → reduced
+
+    pool_timeout=30,
+    pool_recycle=300,     # was 1800 → faster recycle (important)
+
+    connect_args=connect_args,
+    echo=False
 )
 
 # ✅ Session factory
@@ -46,7 +56,7 @@ def get_db():
     try:
         yield db
     except Exception:
-        db.rollback()   # 🔥 prevents broken transactions
+        db.rollback()
         raise
     finally:
         db.close()

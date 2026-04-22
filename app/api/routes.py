@@ -5,12 +5,15 @@ from app.auth.dependencies import get_current_user
 from app.db.connection import get_db
 from app.db.models import Detection
 from app.tasks.inference_task import run_inference_task
+from app.services.yolo_service import detect_objects
 
 import cloudinary
 import cloudinary.uploader
 import os
 import uuid
 from datetime import datetime
+import tempfile
+import shutil
 
 router = APIRouter()
 
@@ -21,40 +24,91 @@ cloudinary.config(
     api_secret=os.getenv("API_SECRET")
 )
 
+# 🔥 OPTIONAL toggle (disable Celery if not needed)
+USE_BACKGROUND_TASK = False
 
-# 🚀 PREDICT (WITH PREVIEW)
+
+# 🚀 PREDICT (FINAL)
 @router.post("/predict")
 def predict_image(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user)
 ):
+    temp_path = None
+
     try:
+        # ✅ File type validation
         if file.content_type not in ["image/jpeg", "image/png"]:
             raise HTTPException(status_code=400, detail="Invalid file type")
+
+        # ✅ OPTIONAL file size limit (5MB)
+        file.file.seek(0, 2)  # move to end
+        file_size = file.file.tell()
+        file.file.seek(0)
+
+        if file_size > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 5MB)")
 
         filename = f"{uuid.uuid4()}_{file.filename}"
         request_id = str(uuid.uuid4())
 
+        # ✅ Save temp file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+        shutil.copyfileobj(file.file, temp_file)
+        temp_file.close()
+        temp_path = temp_file.name
+
+        # 🔥 Reset pointer
+        file.file.seek(0)
+
         # ✅ Upload to Cloudinary
-        upload_result = cloudinary.uploader.upload(file.file)
+        upload_result = cloudinary.uploader.upload(temp_path)
         image_url = upload_result.get("secure_url")
 
         if not image_url:
             raise HTTPException(status_code=500, detail="Cloud upload failed")
 
-        # 🔥 OPTIONAL PREVIEW (light detection)
-        preview_result = {
-            "message": "Preview unavailable (processed asynchronously)"
+        # 🔥 FULL DETECTION (SYNC)
+        full_result = detect_objects(temp_path, confidence_threshold=0.25)
+
+        if "error" in full_result:
+            raise Exception(full_result["error"])
+
+        # ✅ Format objects
+        objects_list = [
+            {
+                "object": d["label"],
+                "confidence": f"{round(d['confidence'] * 100, 2)}%"
+            }
+            for d in full_result.get("detections", [])
+        ]
+
+        # ✅ Analytics
+        analytics = {}
+        for d in full_result.get("detections", []):
+            label = d["label"]
+            analytics[label] = analytics.get(label, 0) + 1
+
+        analytics = dict(sorted(analytics.items(), key=lambda x: x[1], reverse=True))
+
+        # ✅ Final result
+        final_result = {
+            "summary": f"Detected {full_result.get('total_objects', 0)} object(s)",
+            "total_objects": full_result.get("total_objects", 0),
+            "objects": objects_list,
+            "analytics": analytics,
+            "processing_time": full_result.get("processing_time"),
+            "status": "success"
         }
 
-        # ✅ Store DB entry
+        # ✅ Save to DB
         detection = Detection(
             filename=filename,
             request_id=request_id,
             image_path=image_url,
-            status="queued",
-            results=None,
+            status="completed",
+            results=final_result,
             user_id=current_user.id,
             created_at=datetime.utcnow()
         )
@@ -63,14 +117,19 @@ def predict_image(
         db.commit()
         db.refresh(detection)
 
-        # ✅ Trigger Celery
-        run_inference_task.delay(image_url, request_id)
+        # 🔥 OPTIONAL background task
+        if USE_BACKGROUND_TASK:
+            run_inference_task.delay(image_url, request_id)
 
         return {
-            "message": "Processing started 🚀",
+            "message": "Processing completed 🚀",
             "request_id": request_id,
-            "status": "queued",
-            "preview": preview_result,
+            "status": "completed",
+            "preview": {
+                "total_objects": final_result["total_objects"],
+                "objects": final_result["objects"]
+            },
+            "result": final_result,
             "image_url": image_url
         }
 
@@ -78,8 +137,12 @@ def predict_image(
         print("UPLOAD ERROR:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
 
-# 🔍 RESULT (FULL OUTPUT)
+
+# 🔍 RESULT
 @router.get("/result/{request_id}")
 def get_result(
     request_id: str,

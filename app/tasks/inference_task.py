@@ -12,9 +12,9 @@ import os
 logger = logging.getLogger(__name__)
 
 
-# ✅ Download image from URL (Cloudinary)
+# ✅ Download helper
 def download_image(url):
-    response = requests.get(url, timeout=30)  # 🔥 add timeout
+    response = requests.get(url, timeout=30)
     response.raise_for_status()
 
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
@@ -27,9 +27,9 @@ def download_image(url):
 @celery_app.task(
     bind=True,
     name="app.tasks.inference_task.run_inference_task",
-    autoretry_for=(Exception,),
+    autoretry_for=(requests.exceptions.RequestException,),
     retry_backoff=5,
-    retry_kwargs={"max_retries": 3}
+    retry_kwargs={"max_retries": 2}
 )
 def run_inference_task(self, image_url, request_id):
     db = SessionLocal()
@@ -40,35 +40,39 @@ def run_inference_task(self, image_url, request_id):
         from app.services.yolo_service import detect_objects
 
         logger.info(f"🔥 TASK STARTED: {request_id}")
-        logger.info(f"🌐 IMAGE URL: {image_url}")
+
+        # ✅ STEP 0: Fetch record
+        detection = db.query(Detection).filter(
+            Detection.request_id == request_id
+        ).first()
+
+        if not detection:
+            logger.error(f"❌ No DB record found: {request_id}")
+            return {"status": "failed", "reason": "record not found"}
+
+        # 🔥 HYBRID FIX: Skip if already completed
+        if detection.status == "completed":
+            logger.info(f"⏭️ Skipping (already completed): {request_id}")
+            return {"status": "skipped"}
+
+        # ✅ Mark processing
+        detection.status = "processing"
+        db.commit()
 
         # ✅ STEP 1: Download image
         local_path = download_image(image_url)
-        logger.info(f"📥 Image downloaded to: {local_path}")
+        logger.info(f"📥 Image downloaded")
 
         start_time = time.time()
 
         # ✅ STEP 2: Run YOLO
         raw_result = detect_objects(local_path)
 
-        # 🔥 HANDLE ERROR CASE
         if "error" in raw_result:
             raise Exception(raw_result["error"])
 
-        logger.info(f"🧠 RAW YOLO OUTPUT: {raw_result}")
-
         end_time = time.time()
 
-        # ✅ STEP 3: Fetch DB record
-        detection = db.query(Detection).filter(
-            Detection.request_id == request_id
-        ).first()
-
-        if not detection:
-            logger.error(f"❌ No DB record found for request_id: {request_id}")
-            return
-
-        # ✅ Extract detections
         detections = raw_result.get("detections", [])
 
         # ✅ Format objects
@@ -88,22 +92,22 @@ def run_inference_task(self, image_url, request_id):
 
         analytics = dict(sorted(analytics.items(), key=lambda x: x[1], reverse=True))
 
-        # ✅ Save result
-        detection.results = {
-            "summary": f"Detected {raw_result.get('total_objects', 0)} object(s)",
-            "total_objects": raw_result.get("total_objects", 0),
-            "objects": objects_list,
-            "analytics": analytics,
-            "processing_time": f"{round(end_time - start_time, 2)} seconds",
-            "status": "success"
-        }
+        # 🔥 FINAL SAVE (safe)
+        if detection.status != "completed":
+            detection.results = {
+                "summary": f"Detected {raw_result.get('total_objects', 0)} object(s)",
+                "total_objects": raw_result.get("total_objects", 0),
+                "objects": objects_list,
+                "analytics": analytics,
+                "processing_time": f"{round(end_time - start_time, 2)} seconds",
+                "status": "success"
+            }
 
-        detection.status = "completed"
+            detection.status = "completed"
+            db.commit()
+            db.refresh(detection)
 
-        db.commit()
-        db.refresh(detection)
-
-        logger.info(f"✅ Detection completed: {request_id}")
+            logger.info(f"✅ Completed: {request_id}")
 
         return {"status": "completed", "objects": len(objects_list)}
 
@@ -114,11 +118,6 @@ def run_inference_task(self, image_url, request_id):
         logger.error(error_trace)
 
         try:
-            if not detection:
-                detection = db.query(Detection).filter(
-                    Detection.request_id == request_id
-                ).first()
-
             if detection:
                 detection.status = "failed"
                 detection.results = {
@@ -131,12 +130,12 @@ def run_inference_task(self, image_url, request_id):
         except Exception as db_error:
             logger.error(f"❌ DB UPDATE FAILED: {db_error}")
 
-        raise self.retry(exc=e)
+        return {"status": "failed", "error": str(e)}
 
     finally:
-        # 🔥 CLEANUP TEMP FILE
+        # 🔥 Cleanup temp file
         if local_path and os.path.exists(local_path):
             os.remove(local_path)
-            logger.info(f"🧹 Temp file deleted: {local_path}")
+            logger.info(f"🧹 Temp file deleted")
 
         db.close()

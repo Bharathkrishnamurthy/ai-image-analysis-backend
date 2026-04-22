@@ -4,27 +4,40 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MODEL_PATH = os.getenv("MODEL_PATH", "yolov8m.pt")
-model = None
+# 🔥 Two models (fast + accurate)
+FAST_MODEL_PATH = os.getenv("FAST_MODEL_PATH", "yolov8n.pt")
+HEAVY_MODEL_PATH = os.getenv("MODEL_PATH", "yolov8m.pt")
+
+fast_model = None
+heavy_model = None
 
 
-def get_model():
-    global model
-    if model is None:
-        from ultralytics import YOLO
-        logger.info("🔥 Loading YOLO model...")
-        model = YOLO(MODEL_PATH)
-    return model
+def get_model(mode="fast"):
+    global fast_model, heavy_model
+
+    from ultralytics import YOLO
+
+    if mode == "fast":
+        if fast_model is None:
+            logger.info("⚡ Loading FAST YOLO model...")
+            fast_model = YOLO(FAST_MODEL_PATH)
+        return fast_model
+
+    else:
+        if heavy_model is None:
+            logger.info("🧠 Loading HEAVY YOLO model...")
+            heavy_model = YOLO(HEAVY_MODEL_PATH)
+        return heavy_model
 
 
-def detect_objects(image_path: str, confidence_threshold: float = 0.3):
+def detect_objects(image_path: str, confidence_threshold: float = 0.3, mode="fast"):
     start_time = time.time()
 
     try:
         if not os.path.exists(image_path):
             return {"error": f"Image not found: {image_path}"}
 
-        model = get_model()
+        model = get_model(mode)
 
         results = model.predict(image_path, conf=confidence_threshold, verbose=False)
 
