@@ -17,18 +17,20 @@ import shutil
 
 router = APIRouter()
 
-# ✅ Cloudinary config
-cloudinary.config(
-    cloud_name=os.getenv("CLOUD_NAME"),
-    api_key=os.getenv("API_KEY"),
-    api_secret=os.getenv("API_SECRET")
-)
+# 🔥 FIX: Configure Cloudinary at runtime
+def configure_cloudinary():
+    cloudinary.config(
+        cloud_name=os.getenv("CLOUD_NAME"),
+        api_key=os.getenv("API_KEY"),
+        api_secret=os.getenv("API_SECRET")
+    )
 
-# 🔥 OPTIONAL toggle (disable Celery if not needed)
+
+# 🔥 OPTIONAL toggle (Celery)
 USE_BACKGROUND_TASK = False
 
 
-# 🚀 PREDICT (FINAL)
+# 🚀 PREDICT
 @router.post("/predict")
 def predict_image(
     file: UploadFile = File(...),
@@ -38,12 +40,15 @@ def predict_image(
     temp_path = None
 
     try:
+        # 🔥 FIX: ensure env is loaded before using Cloudinary
+        configure_cloudinary()
+
         # ✅ File type validation
         if file.content_type not in ["image/jpeg", "image/png"]:
             raise HTTPException(status_code=400, detail="Invalid file type")
 
-        # ✅ OPTIONAL file size limit (5MB)
-        file.file.seek(0, 2)  # move to end
+        # ✅ File size validation (5MB)
+        file.file.seek(0, 2)
         file_size = file.file.tell()
         file.file.seek(0)
 
@@ -59,17 +64,14 @@ def predict_image(
         temp_file.close()
         temp_path = temp_file.name
 
-        # 🔥 Reset pointer
-        file.file.seek(0)
-
-        # ✅ Upload to Cloudinary
+        # 🔥 Upload to Cloudinary
         upload_result = cloudinary.uploader.upload(temp_path)
         image_url = upload_result.get("secure_url")
 
         if not image_url:
             raise HTTPException(status_code=500, detail="Cloud upload failed")
 
-        # 🔥 FULL DETECTION (SYNC)
+        # 🔥 YOLO Detection
         full_result = detect_objects(temp_path, confidence_threshold=0.25)
 
         if "error" in full_result:
@@ -117,7 +119,7 @@ def predict_image(
         db.commit()
         db.refresh(detection)
 
-        # 🔥 OPTIONAL background task
+        # 🔥 Optional background processing
         if USE_BACKGROUND_TASK:
             run_inference_task.delay(image_url, request_id)
 
