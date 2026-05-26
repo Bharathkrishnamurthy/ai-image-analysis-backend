@@ -1,0 +1,72 @@
+/* 🌙 Modern Dark Theme */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(135deg, #111827, #1f2937);
+  color: #ffffff;
+}
+
+/* Scrollbar (nice touch) */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 10px;
+}
+
+/* Smooth transitions */
+button, input {
+  transition: all 0.2s ease;
+}
+
+/* Input styling */
+input {
+  padding: 12px;
+  border-radius: 8px;
+  border: none;
+  outline: none;
+  background: #374151;
+  color: white;
+}
+
+/* Button styling */
+button {
+  background: #3b82f6;
+  color: white;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #2563eb;
+}
+
+/* Card container */
+.card {
+  background: #1f2937;
+  padding: 20px;
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+}
+
+/* Center layout */
+.container {
+  max-width: 700px;
+  margin: auto;
+  padding: 20px;
+}
+
+/* Image styling */
+img {
+  border-radius: 10px;
+  margin-top: 10px;
+}
