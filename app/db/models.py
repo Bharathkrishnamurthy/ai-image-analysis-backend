@@ -4,10 +4,10 @@ from sqlalchemy.orm import relationship
 from app.db.connection import Base
 
 
-# ✅ USER MODEL (FIXED)
+# ✅ USER MODEL
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = {"extend_existing": True}  # 🔥 FIX FOR YOUR ERROR
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True, nullable=False)
@@ -22,14 +22,24 @@ class Detection(Base):
     __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True, index=True)
+
     request_id = Column(String, unique=True, index=True, nullable=False)
 
     filename = Column(String, nullable=False)
+
     image_path = Column(String, nullable=True)
 
     status = Column(String, default="processing", nullable=False)
 
+    prediction = Column(String, nullable=True)
+
+    confidence = Column(String, nullable=True)
+
     results = Column(JSON, nullable=True)
+
+    processing_time = Column(String, nullable=True)
+
+    model_version = Column(String, default="v1")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
