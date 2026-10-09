@@ -1,404 +1,402 @@
+
+import logging
+import os
+import tempfile
+import uuid
+from io import BytesIO
+from pathlib import Path
+
+import cloudinary
+import cloudinary.uploader
 from fastapi import (
     APIRouter,
     Depends,
-    UploadFile,
     File,
     HTTPException,
-    Query
+    Query,
+    UploadFile,
+    status,
 )
-
+from PIL import Image, UnidentifiedImageError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.db.connection import get_db
 from app.db.models import Detection
 from app.tasks.inference_task import run_inference_task
-from app.services.yolo_service import detect_objects
 
-import cloudinary
-import cloudinary.uploader
-
-import os
-import uuid
-import tempfile
-import shutil
-
-from datetime import datetime
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+ALLOWED_CONTENT_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+}
 
-# 🔥 Configure Cloudinary
+
 def configure_cloudinary():
+    """Configure Cloudinary from environment variables."""
+
+    cloud_name = os.getenv("CLOUD_NAME")
+    api_key = os.getenv("API_KEY")
+    api_secret = os.getenv("API_SECRET")
+
+    if not all([cloud_name, api_key, api_secret]):
+        raise RuntimeError(
+            "Cloudinary configuration is incomplete."
+        )
+
     cloudinary.config(
-        cloud_name=os.getenv("CLOUD_NAME"),
-        api_key=os.getenv("API_KEY"),
-        api_secret=os.getenv("API_SECRET")
+        cloud_name=cloud_name,
+        api_key=api_key,
+        api_secret=api_secret,
+        secure=True,
     )
 
 
-# 🔥 Toggle Celery Background Tasks
-USE_BACKGROUND_TASK = False
+def validate_image(image_bytes: bytes, content_type: str):
+    """Validate image size, declared MIME type, and actual image format."""
+
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only JPG and PNG images are allowed.",
+        )
+
+    if not image_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty.",
+        )
+
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="File too large. Maximum size is 5 MB.",
+        )
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            expected_format = (
+                "JPEG" if content_type == "image/jpeg" else "PNG"
+            )
+
+            if image.format != expected_format:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="File contents do not match the image type.",
+                )
+
+            image.verify()
+
+    except UnidentifiedImageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is not a valid image.",
+        ) from exc
+
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded image is invalid or corrupted.",
+        ) from exc
 
 
-# 🚀 IMAGE PREDICTION
-@router.post("/predict")
+@router.post(
+    "/predict",
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def predict_image(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
 ):
+    """Upload an image and queue YOLO inference in Celery."""
+
     temp_path = None
 
     try:
-        # ✅ Configure cloudinary
+        content_type = (file.content_type or "").lower()
+
+        # Read no more than the configured limit plus one byte.
+        image_bytes = file.file.read(MAX_UPLOAD_BYTES + 1)
+
+        validate_image(image_bytes, content_type)
+
+        original_name = Path(file.filename or "image").name
+        safe_name = original_name.replace("\x00", "")[:150]
+
+        if not safe_name:
+            safe_name = "image"
+
+        request_id = str(uuid.uuid4())
+        stored_filename = f"{request_id}_{safe_name}"
+
+        # Cloudinary needs a temporary file for upload.
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=ALLOWED_CONTENT_TYPES[content_type],
+        ) as temp_file:
+            temp_file.write(image_bytes)
+            temp_path = temp_file.name
+
         configure_cloudinary()
 
-        # ✅ Validate file type
-        if file.content_type not in ["image/jpeg", "image/png"]:
-            raise HTTPException(
-                status_code=400,
-                detail="Only JPG and PNG images are allowed"
-            )
-
-        # ✅ Validate file size (5MB)
-        file.file.seek(0, 2)
-        file_size = file.file.tell()
-        file.file.seek(0)
-
-        if file_size > 5 * 1024 * 1024:
-            raise HTTPException(
-                status_code=400,
-                detail="File too large (max 5MB)"
-            )
-
-        # ✅ Generate IDs
-        filename = f"{uuid.uuid4()}_{file.filename}"
-        request_id = str(uuid.uuid4())
-
-        # ✅ Save temporary file
-        temp_file = tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".jpg"
+        upload_result = cloudinary.uploader.upload(
+            temp_path,
+            resource_type="image",
+            folder="ai-image-analysis",
         )
-
-        shutil.copyfileobj(file.file, temp_file)
-
-        temp_file.close()
-
-        temp_path = temp_file.name
-
-        # 🔥 Upload image to Cloudinary
-        upload_result = cloudinary.uploader.upload(temp_path)
 
         image_url = upload_result.get("secure_url")
 
         if not image_url:
-            raise HTTPException(
-                status_code=500,
-                detail="Cloudinary upload failed"
-            )
+            raise RuntimeError("Cloudinary did not return an image URL.")
 
-        # 🔥 YOLO Detection
-        full_result = detect_objects(
-            temp_path,
-            confidence_threshold=0.25
-        )
-
-        if "error" in full_result:
-            raise Exception(full_result["error"])
-
-        # ✅ Format object list
-        objects_list = [
-            {
-                "object": d["label"],
-                "confidence": f"{round(d['confidence'] * 100, 2)}%"
-            }
-            for d in full_result.get("detections", [])
-        ]
-
-        # ✅ Analytics
-        analytics = {}
-
-        for d in full_result.get("detections", []):
-
-            label = d["label"]
-
-            analytics[label] = analytics.get(label, 0) + 1
-
-        analytics = dict(
-            sorted(
-                analytics.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
-        )
-
-        # ✅ Final AI Result
-        final_result = {
-            "summary": f"Detected {full_result.get('total_objects', 0)} object(s)",
-            "total_objects": full_result.get("total_objects", 0),
-            "objects": objects_list,
-            "analytics": analytics,
-            "processing_time": full_result.get("processing_time"),
-            "status": "success"
-        }
-
-        # ✅ Save Detection to PostgreSQL
+        # Create the database record before queueing the task.
         detection = Detection(
-
-            filename=filename,
-
+            filename=stored_filename,
             request_id=request_id,
-
             image_path=image_url,
-
-            status="completed",
-
-            prediction=(
-                objects_list[0]["object"]
-                if objects_list else "unknown"
-            ),
-
-            confidence=(
-                objects_list[0]["confidence"]
-                if objects_list else "0%"
-            ),
-
-            processing_time=str(
-                full_result.get("processing_time")
-            ),
-
+            status="pending",
+            prediction=None,
+            confidence=None,
+            processing_time=None,
             model_version="yolo-v1",
-
-            results=final_result,
-
+            results={
+                "summary": "Inference queued",
+                "status": "pending",
+            },
             user_id=current_user.id,
-
-            created_at=datetime.utcnow()
         )
 
         db.add(detection)
-
         db.commit()
-
         db.refresh(detection)
 
-        # 🔥 Optional Celery Background Processing
-        if USE_BACKGROUND_TASK:
-            run_inference_task.delay(
-                image_url,
-                request_id
+        # Queue only the request ID. The worker retrieves the URL
+        # from this database record.
+        try:
+            run_inference_task.delay(request_id)
+
+        except Exception as queue_error:
+            logger.exception(
+                "Could not enqueue inference for %s",
+                request_id,
             )
 
-        # ✅ API Response
+            detection.status = "failed"
+            detection.results = {
+                "summary": "Could not queue inference",
+                "status": "failed",
+                "error": "Background processing is unavailable.",
+            }
+            db.commit()
+
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Background processing is unavailable. Please try again later.",
+            ) from queue_error
+
         return {
-            "message": "Processing completed 🚀",
-
+            "message": "Image uploaded; inference queued.",
             "request_id": request_id,
-
-            "status": "completed",
-
-            "preview": {
-                "total_objects": final_result["total_objects"],
-                "objects": final_result["objects"]
+            "status": "pending",
+            "preview": None,
+            "result": {
+                "summary": "Inference queued",
+                "status": "pending",
             },
-
-            "result": final_result,
-
-            "image_url": image_url
+            "image_url": image_url,
         }
 
-    except Exception as e:
+    except HTTPException:
+        raise
 
-        print("UPLOAD ERROR:", e)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("Database operation failed during image upload.")
 
         raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database operation failed.",
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Image upload failed.")
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Image upload failed. Please try again.",
+        ) from exc
 
     finally:
-
         if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+            try:
+                os.remove(temp_path)
+            except OSError:
+                logger.warning(
+                    "Could not remove upload temporary file: %s",
+                    temp_path,
+                )
+
+        file.file.close()
 
 
-# 🔍 GET SINGLE RESULT
 @router.get("/result/{request_id}")
 def get_result(
     request_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
 ):
+    """Return the status and result of one of the current user's jobs."""
 
-    detection = db.query(Detection).filter(
-        Detection.request_id == request_id,
-        Detection.user_id == current_user.id
-    ).first()
+    detection = (
+        db.query(Detection)
+        .filter(
+            Detection.request_id == request_id,
+            Detection.user_id == current_user.id,
+        )
+        .first()
+    )
 
-    if not detection:
+    if detection is None:
         raise HTTPException(
-            status_code=404,
-            detail="Detection not found"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Detection not found.",
         )
 
     return {
         "request_id": detection.request_id,
-
-        "status": detection.status,
-
+        "status": (detection.status or "pending").lower(),
         "prediction": detection.prediction,
-
         "confidence": detection.confidence,
-
         "processing_time": detection.processing_time,
-
         "model_version": detection.model_version,
-
-        "result": detection.results or {}
+        "image_url": detection.image_path,
+        "result": detection.results or {},
     }
 
 
-# 📊 HISTORY API WITH PAGINATION
 @router.get("/history")
 def get_history(
     page: int = Query(1, ge=1),
-    limit: int = Query(10, le=100),
-
+    limit: int = Query(10, ge=1, le=100),
     db: Session = Depends(get_db),
-
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
 ):
+    """Return paginated prediction history for the authenticated user."""
 
-    offset = (page - 1) * limit
+    query = db.query(Detection).filter(
+        Detection.user_id == current_user.id
+    )
+
+    total = query.count()
 
     detections = (
-        db.query(Detection)
-        .filter(Detection.user_id == current_user.id)
-        .order_by(Detection.created_at.desc())
-        .offset(offset)
+        query.order_by(
+            Detection.created_at.desc(),
+            Detection.id.desc(),
+        )
+        .offset((page - 1) * limit)
         .limit(limit)
         .all()
     )
 
-    total = (
-        db.query(Detection)
-        .filter(Detection.user_id == current_user.id)
-        .count()
-    )
-
     return {
-
         "page": page,
-
         "limit": limit,
-
         "total": total,
-
         "data": [
             {
-                "request_id": d.request_id,
-
-                "filename": d.filename,
-
-                "status": d.status,
-
-                "prediction": d.prediction,
-
-                "confidence": d.confidence,
-
-                "processing_time": d.processing_time,
-
-                "model_version": d.model_version,
-
-                "result": d.results or {},
-
-                "image_url": d.image_path,
-
-                "created_at": d.created_at
+                "request_id": item.request_id,
+                "filename": item.filename,
+                "status": (item.status or "pending").lower(),
+                "prediction": item.prediction,
+                "confidence": item.confidence,
+                "processing_time": item.processing_time,
+                "model_version": item.model_version,
+                "result": item.results or {},
+                "image_url": item.image_path,
+                "created_at": item.created_at,
             }
-
-            for d in detections
-        ]
+            for item in detections
+        ],
     }
 
 
-# 📈 ANALYTICS API
 @router.get("/analytics")
 def get_analytics(
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
 ):
+    """Return analytics for the authenticated user's detections."""
 
-    detections = db.query(Detection).filter(
-        Detection.user_id == current_user.id
-    ).all()
-
-    total_uploads = len(detections)
-
-    completed_jobs = len([
-        d for d in detections
-        if d.status == "completed"
-    ])
-
-    failed_jobs = len([
-        d for d in detections
-        if d.status == "failed"
-    ])
-
-    object_counts = {}
-
-    processing_times = []
-
-    for d in detections:
-
-        # ✅ Object analytics
-        if d.results and "analytics" in d.results:
-
-            for obj, count in d.results["analytics"].items():
-
-                object_counts[obj] = (
-                    object_counts.get(obj, 0) + count
-                )
-
-        # ✅ Processing time analytics
-        if d.processing_time:
-
-            try:
-                processing_times.append(
-                    float(d.processing_time)
-                )
-
-            except:
-                pass
-
-    # ✅ Average processing time
-    avg_processing_time = (
-        round(
-            sum(processing_times) / len(processing_times),
-            2
-        )
-        if processing_times else 0
+    detections = (
+        db.query(Detection)
+        .filter(Detection.user_id == current_user.id)
+        .all()
     )
 
-    # ✅ Most detected object
+    total_uploads = len(detections)
+    completed_jobs = 0
+    failed_jobs = 0
+    object_counts = {}
+    processing_times = []
+
+    for item in detections:
+        item_status = (item.status or "").lower()
+
+        if item_status == "completed":
+            completed_jobs += 1
+        elif item_status == "failed":
+            failed_jobs += 1
+
+        # Count objects only for successfully completed predictions.
+        if item_status == "completed" and item.results:
+            for label, count in item.results.get("analytics", {}).items():
+                try:
+                    object_counts[label] = (
+                        object_counts.get(label, 0) + int(count)
+                    )
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Invalid analytics value in detection %s",
+                        item.request_id,
+                    )
+
+        if item_status == "completed" and item.processing_time:
+            try:
+                processing_time = float(item.processing_time)
+                if processing_time >= 0:
+                    processing_times.append(processing_time)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid processing time in detection %s",
+                    item.request_id,
+                )
+
     most_detected_object = (
         max(object_counts, key=object_counts.get)
-        if object_counts else None
+        if object_counts
+        else None
+    )
+
+    average_processing_time = (
+        round(sum(processing_times) / len(processing_times), 2)
+        if processing_times
+        else 0
     )
 
     return {
-
         "total_uploads": total_uploads,
-
         "completed_jobs": completed_jobs,
-
         "failed_jobs": failed_jobs,
-
         "most_detected_object": most_detected_object,
-
         "object_counts": object_counts,
-
-        "average_processing_time": avg_processing_time
+        "average_processing_time": average_processing_time,
     }

@@ -1,245 +1,323 @@
+
+import logging
+import os
+import tempfile
+import time
+from urllib.parse import urlparse
+
+import requests
+from PIL import Image
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.celery_worker import celery
 from app.db.connection import SessionLocal
 from app.db.models import Detection
+from app.services.yolo_service import detect_objects
 
-import logging
-import time
-import traceback
-import os
-
-
-# ✅ Logger
 logger = logging.getLogger(__name__)
+
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+ALLOWED_CONTENT_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+}
+
+
+def download_cloudinary_image(image_url: str) -> str:
+    """Download an application-uploaded Cloudinary image safely."""
+
+    parsed = urlparse(image_url)
+
+    if parsed.scheme != "https":
+        raise ValueError("Image URL must use HTTPS.")
+
+    hostname = (parsed.hostname or "").lower()
+
+    if not (
+        hostname == "cloudinary.com"
+        or hostname.endswith(".cloudinary.com")
+    ):
+        raise ValueError("Image URL is not from Cloudinary.")
+
+    if parsed.username or parsed.password or parsed.port:
+        raise ValueError("Unexpected image URL format.")
+
+    response = requests.get(
+        image_url,
+        stream=True,
+        timeout=(10, 45),
+        allow_redirects=False,
+    )
+
+    try:
+        response.raise_for_status()
+
+        content_type = (
+            response.headers.get("Content-Type", "")
+            .split(";")[0]
+            .strip()
+            .lower()
+        )
+
+        if content_type not in ALLOWED_CONTENT_TYPES:
+            raise ValueError("Downloaded file is not a supported image.")
+
+        content_length = response.headers.get("Content-Length")
+
+        if content_length:
+            try:
+                if int(content_length) > MAX_IMAGE_BYTES:
+                    raise ValueError("Image exceeds the allowed size.")
+            except ValueError as exc:
+                if str(exc) == "Image exceeds the allowed size.":
+                    raise
+                raise ValueError("Invalid image content length.") from exc
+
+        temp_path = None
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=ALLOWED_CONTENT_TYPES[content_type],
+            ) as temp_file:
+                temp_path = temp_file.name
+                total_bytes = 0
+
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+
+                    total_bytes += len(chunk)
+
+                    if total_bytes > MAX_IMAGE_BYTES:
+                        raise ValueError("Image exceeds the allowed size.")
+
+                    temp_file.write(chunk)
+
+            if total_bytes == 0:
+                raise ValueError("Downloaded image is empty.")
+
+            # Validate that the bytes form a readable image.
+            with Image.open(temp_path) as image:
+                if image.format not in {"JPEG", "PNG"}:
+                    raise ValueError("Only JPEG and PNG images are allowed.")
+                image.verify()
+
+            return temp_path
+
+        except Exception:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+    finally:
+        response.close()
 
 
 @celery.task(
     bind=True,
-
     name="app.tasks.run_inference_task",
-
-    autoretry_for=(Exception,),
-
-    retry_kwargs={"max_retries": 3},
-
-    retry_backoff=True
+    max_retries=3,
 )
-def run_inference_task(self, image_path, request_id):
-
+def run_inference_task(self, request_id: str):
     db = SessionLocal()
-
-    detection = None
+    temp_path = None
 
     try:
+        detection = (
+            db.query(Detection)
+            .filter(Detection.request_id == request_id)
+            .first()
+        )
 
-        from app.services.yolo_service import detect_objects
-
-        logger.info(f"🚀 TASK STARTED → {request_id}")
-
-        # ✅ Fetch detection record
-        detection = db.query(Detection).filter(
-            Detection.request_id == request_id
-        ).first()
-
-        if not detection:
-
-            logger.error(
-                f"❌ Detection record not found → {request_id}"
-            )
-
+        if detection is None:
+            logger.error("Detection record not found: %s", request_id)
             return {
-                "status": "FAILED",
-                "reason": "record_not_found"
+                "request_id": request_id,
+                "status": "failed",
+                "reason": "record_not_found",
             }
 
-        # ✅ Skip already completed tasks
-        if detection.status == "COMPLETED":
+        current_status = (detection.status or "").lower()
 
-            logger.info(
-                f"⏭️ Task already completed → {request_id}"
-            )
-
+        if current_status == "completed":
             return {
-                "status": "SKIPPED"
+                "request_id": request_id,
+                "status": "completed",
+                "message": "Already processed",
             }
 
-        # ✅ Update processing state
-        detection.status = "PROCESSING"
+        if not detection.image_path:
+            raise ValueError("Detection record has no image URL.")
 
+        image_url = detection.image_path
+
+        detection.status = "processing"
+        detection.results = {
+            "summary": "Inference is in progress",
+            "status": "processing",
+        }
         db.commit()
 
-        # ✅ Validate image exists
-        if not os.path.exists(image_path):
+        temp_path = download_cloudinary_image(image_url)
 
-            raise Exception(
-                f"Image file not found → {image_path}"
-            )
+        start_time = time.perf_counter()
 
-        # 🚀 Start timing
-        start_time = time.time()
-
-        # 🔥 Run YOLO Detection
-        raw_result = detect_objects(image_path)
-
-        if "error" in raw_result:
-
-            raise Exception(raw_result["error"])
-
-        # 🚀 End timing
-        end_time = time.time()
+        raw_result = detect_objects(
+            temp_path,
+            confidence_threshold=0.25,
+        )
 
         processing_time = round(
-            end_time - start_time,
-            2
+            time.perf_counter() - start_time,
+            2,
         )
 
-        detections = raw_result.get(
-            "detections",
-            []
-        )
+        if not isinstance(raw_result, dict):
+            raise RuntimeError("YOLO returned an invalid result.")
 
-        # ✅ Format object list
-        objects_list = [
-            {
-                "object": d["label"],
+        if raw_result.get("error"):
+            raise RuntimeError(str(raw_result["error"]))
 
-                "confidence": (
-                    f"{round(d['confidence'] * 100, 2)}%"
-                )
-            }
+        raw_detections = raw_result.get("detections", [])
 
-            for d in detections
-        ]
-
-        # ✅ Object Analytics
+        objects_list = []
         analytics = {}
 
-        for d in detections:
+        for item in raw_detections:
+            label = str(item["label"])
+            confidence = float(item["confidence"])
 
-            label = d["label"]
+            if not 0 <= confidence <= 1:
+                raise ValueError("YOLO returned an invalid confidence.")
 
-            analytics[label] = (
-                analytics.get(label, 0) + 1
-            )
+            objects_list.append({
+                "object": label,
+                "confidence": f"{round(confidence * 100, 2)}%",
+            })
+
+            analytics[label] = analytics.get(label, 0) + 1
 
         analytics = dict(
             sorted(
                 analytics.items(),
-                key=lambda x: x[1],
-                reverse=True
+                key=lambda item: item[1],
+                reverse=True,
             )
         )
 
-        # ✅ Main prediction
-        main_prediction = (
-            objects_list[0]["object"]
-            if objects_list else "unknown"
-        )
+        total_objects = len(objects_list)
 
-        # ✅ Main confidence
-        main_confidence = (
-            objects_list[0]["confidence"]
-            if objects_list else "0%"
-        )
-
-        # ✅ Save final structured result
-        detection.results = {
-
-            "summary": (
-                f"Detected "
-                f"{raw_result.get('total_objects', 0)} "
-                f"object(s)"
-            ),
-
-            "total_objects": raw_result.get(
-                "total_objects",
-                0
-            ),
-
+        final_result = {
+            "summary": f"Detected {total_objects} object(s)",
+            "total_objects": total_objects,
             "objects": objects_list,
-
             "analytics": analytics,
-
             "processing_time": processing_time,
-
-            "status": "success"
+            "status": "success",
         }
 
-        # ✅ Save AI metadata
-        detection.prediction = main_prediction
-
-        detection.confidence = main_confidence
-
-        detection.processing_time = str(
-            processing_time
+        # Re-fetch the record after inference before updating it.
+        detection = (
+            db.query(Detection)
+            .filter(Detection.request_id == request_id)
+            .first()
         )
 
-        detection.model_version = "yolo-v1"
+        if detection is None:
+            raise RuntimeError("Detection record disappeared.")
 
-        detection.status = "COMPLETED"
+        detection.prediction = (
+            objects_list[0]["object"] if objects_list else "unknown"
+        )
+        detection.confidence = (
+            objects_list[0]["confidence"] if objects_list else "0%"
+        )
+        detection.processing_time = str(processing_time)
+        detection.results = final_result
+        detection.status = "completed"
 
         db.commit()
 
-        db.refresh(detection)
-
-        logger.info(
-            f"✅ TASK COMPLETED → {request_id}"
-        )
+        logger.info("Inference completed: %s", request_id)
 
         return {
-
-            "status": "COMPLETED",
-
             "request_id": request_id,
-
-            "objects_detected": len(objects_list),
-
-            "processing_time": processing_time
+            "status": "completed",
+            "objects_detected": total_objects,
+            "processing_time": processing_time,
         }
 
-    except Exception as e:
-
-        error_trace = traceback.format_exc()
-
-        logger.error(
-            f"❌ TASK FAILED → {request_id}"
-        )
-
-        logger.error(error_trace)
-
-        # ✅ Safe DB rollback
+    except Exception as exc:
         db.rollback()
 
-        # ✅ Update DB failure state
-        if detection:
+        logger.exception(
+            "Inference attempt failed for request %s",
+            request_id,
+        )
 
+        # Retry transient failures. Do not mark the request failed
+        # until all configured attempts have been exhausted.
+        if self.request.retries < self.max_retries:
             try:
-
-                detection.status = "FAILED"
-
-                detection.results = {
-
-                    "summary": "Processing failed",
-
-                    "error": str(e),
-
-                    "trace": error_trace
-                }
-
-                db.commit()
-
-            except Exception as db_error:
-
-                logger.error(
-                    f"❌ DB UPDATE FAILED → {db_error}"
+                detection = (
+                    db.query(Detection)
+                    .filter(Detection.request_id == request_id)
+                    .first()
                 )
 
+                if detection is not None:
+                    detection.status = "pending"
+                    detection.results = {
+                        "summary": "Inference retry scheduled",
+                        "status": "pending",
+                    }
+                    db.commit()
+
+            except Exception:
+                db.rollback()
+                logger.exception("Could not update retry status.")
+
+            raise self.retry(
+                exc=exc,
+                countdown=2 ** (self.request.retries + 1),
+            )
+
+        # All attempts exhausted.
+        try:
+            detection = (
+                db.query(Detection)
+                .filter(Detection.request_id == request_id)
+                .first()
+            )
+
+            if detection is not None:
+                detection.status = "failed"
+                detection.results = {
+                    "summary": "Processing failed",
+                    "status": "failed",
+                    "error": "Inference failed after retries.",
+                }
+                db.commit()
+
+        except Exception:
+            db.rollback()
+            logger.exception("Could not save final failure status.")
+
         return {
-
-            "status": "FAILED",
-
-            "error": str(e)
+            "request_id": request_id,
+            "status": "failed",
+            "error": "Inference failed after retries.",
         }
 
     finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                logger.warning(
+                    "Could not remove temporary image: %s",
+                    temp_path,
+                )
 
         db.close()
